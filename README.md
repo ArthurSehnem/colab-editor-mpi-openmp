@@ -14,7 +14,7 @@ Este projeto implementa um editor de texto colaborativo que permite a edição s
 
 ## 🧰 Tecnologias utilizadas
 
-- Linguagem **C/C++**
+- Linguagem **C**
 - Biblioteca **OpenMP** para paralelismo em memória compartilhada
 - Biblioteca **MPI** (MPICH ou OpenMPI) para comunicação entre processos
 
