@@ -3,68 +3,50 @@
 #include <string.h>
 #include <mpi.h>
 #include <omp.h>
-#include <unistd.h> // Para usleep
-#include <time.h>   // Para logs com timestamp
+#include <unistd.h>
+#include <time.h>
 
 #define MAX_LINHAS 50
 #define MAX_TAM_LINHA 256
-#define MAX_MSG_PRIVADA 200 // Tamanho máximo para mensagens privadas
-#define LOG_BUFFER_SIZE (MAX_TAM_LINHA * 3) // Buffer para construir mensagens de log (aumentado para segurança)
+#define MAX_MSG_PRIVADA 200
+#define LOG_BUFFER_SIZE (MAX_TAM_LINHA * 3)
 
-// --- Definição de Tags para Comunicação MPI ---
-#define TAG_SOLICITAR_EDICAO    10 // Cliente -> Servidor: Quero editar esta linha
-#define TAG_RESPOSTA_EDICAO     11 // Servidor -> Cliente: Linha concedida/negada
-#define TAG_ATUALIZACAO_TEXTO   12 // Servidor -> Todos (Bcast): Nova versão da linha
-#define TAG_MSG_PRIVADA_SEND    13 // Cliente -> Outro Cliente/Servidor: Mensagem privada
-#define TAG_LIBERAR_LINHA       14 // Cliente -> Servidor: Edição concluída, nova linha
-#define TAG_SAIR                15 // Cliente -> Servidor: Cliente quer sair
+#define TAG_SOLICITAR_EDICAO    10
+#define TAG_RESPOSTA_EDICAO     11
+#define TAG_ATUALIZACAO_TEXTO   12
+#define TAG_MSG_PRIVADA_SEND    13
+#define TAG_LIBERAR_LINHA       14
+#define TAG_SAIR                15
 
-// --- Estruturas de Mensagem ---
-
-// Mensagem para solicitação/resposta de edição e liberação
 typedef struct {
     int linha;
-    char conteudo[MAX_TAM_LINHA]; // Usado para enviar o novo conteúdo ou apenas para solicitação
-    int sucesso; // 1 = sucesso, 0 = falha (linha ocupada)
-    int rank_solicitante; // Rank do processo que está solicitando/editando
+    char conteudo[MAX_TAM_LINHA];
+    int sucesso;
+    int rank_solicitante;
 } MensagemEdicao;
 
-// Mensagem para comunicação privada
 typedef struct {
     int remetente_rank;
+    int destino_rank;
     char mensagem[MAX_MSG_PRIVADA];
 } MensagemPrivada;
 
-
-// --- Variáveis Globais (compartilhadas por threads OpenMP, mas consistência MPI) ---
-// O array 'texto' e 'linha_em_uso' são as cópias locais.
-// A cópia "verdadeira" do estado de 'linha_em_uso' e do 'texto' está no servidor (rank 0).
 char texto[MAX_LINHAS][MAX_TAM_LINHA];
-// Para o servidor: 0 = livre, rank_do_cliente = ocupada
-// Para os clientes: A cópia local 'linha_em_uso' não é a fonte da verdade sobre quem ocupa.
-// Eles dependem da resposta do servidor. No entanto, é atualizada via broadcast do texto
-// para manter a visualização.
 int linha_em_uso[MAX_LINHAS];
 
-
-// --- Funções Auxiliares ---
-
-// Gera um grande volume de dados para teste usando OpenMP
 void gerar_texto_com_openmp() {
     printf("[Servidor] Gerando texto inicial com OpenMP...\n");
     #pragma omp parallel for
     for (int i = 0; i < MAX_LINHAS; i++) {
         sprintf(texto[i], "Linha gerada automaticamente %d (thread %d)", i, omp_get_thread_num());
-        linha_em_uso[i] = 0; // Inicialmente todas as linhas estão livres no servidor
+        linha_em_uso[i] = 0;
     }
     printf("[Servidor] Geração de texto concluída.\n");
 }
 
-// Imprime o texto atual. Cada processo imprime sua cópia local.
 void imprimir_texto(int rank) {
     printf("\n--- Texto Atual (P%d) ---\n", rank);
     for (int i = 0; i < MAX_LINHAS; i++) {
-        // No servidor, mostra quem ocupa a linha. Nos clientes, apenas o texto.
         if (rank == 0 && linha_em_uso[i] != 0) {
             printf("[%02d]: %s (OCUPADA por P%d)\n", i, texto[i], linha_em_uso[i]);
         } else {
@@ -74,7 +56,6 @@ void imprimir_texto(int rank) {
     printf("--------------------------\n");
 }
 
-// Imprime logs de alteração (servidor é o principal ponto de log)
 void log_evento(const char* tipo, int rank, const char* mensagem_formatada) {
     time_t timer;
     char buffer_tempo[26];
@@ -85,14 +66,13 @@ void log_evento(const char* tipo, int rank, const char* mensagem_formatada) {
     strftime(buffer_tempo, 26, "%Y-%m-%d %H:%M:%S", tm_info);
 
     printf("[%s] [P%d] %s: %s\n", buffer_tempo, rank, tipo, mensagem_formatada);
-    fflush(stdout); // Garante que o log seja impresso imediatamente
+    fflush(stdout);
 }
 
-// --- Funções do Servidor ---
 void servidor_loop(int rank, int size) {
-    char log_buffer[LOG_BUFFER_SIZE]; // Buffer para construir mensagens de log
+    char log_buffer[LOG_BUFFER_SIZE];
 
-    gerar_texto_com_openmp(); // Geração de dados com OpenMP
+    gerar_texto_com_openmp();
     log_evento("Servidor", rank, "Texto inicial gerado.");
     imprimir_texto(rank);
 
@@ -115,16 +95,16 @@ void servidor_loop(int rank, int size) {
                 int cliente_rank = status.MPI_SOURCE;
 
                 if (linha < 0 || linha >= MAX_LINHAS) {
-                    msg_edicao.sucesso = 0; // Linha inválida
+                    msg_edicao.sucesso = 0;
                     snprintf(log_buffer, LOG_BUFFER_SIZE, "Solicitação de edição de linha inválida (%d) recebida de P%d.", linha, cliente_rank);
                     log_evento("Servidor", rank, log_buffer);
-                } else if (linha_em_uso[linha] != 0) { // Linha ocupada
-                    msg_edicao.sucesso = 0; // Falha
+                } else if (linha_em_uso[linha] != 0) {
+                    msg_edicao.sucesso = 0;
                     snprintf(log_buffer, LOG_BUFFER_SIZE, "Requisição de edição da linha %d negada a P%d (ocupada por P%d).", linha, cliente_rank, linha_em_uso[linha]);
                     log_evento("Servidor", rank, log_buffer);
-                } else { // Linha livre
-                    linha_em_uso[linha] = cliente_rank; // Marca a linha como ocupada pelo cliente
-                    msg_edicao.sucesso = 1; // Sucesso
+                } else {
+                    linha_em_uso[linha] = cliente_rank;
+                    msg_edicao.sucesso = 1;
                     snprintf(log_buffer, LOG_BUFFER_SIZE, "Concedeu edição da linha %d para P%d.", linha, cliente_rank);
                     log_evento("Servidor", rank, log_buffer);
                 }
@@ -135,15 +115,14 @@ void servidor_loop(int rank, int size) {
                 int linha = msg_edicao.linha;
                 int cliente_rank = status.MPI_SOURCE;
 
-                if (linha_em_uso[linha] == cliente_rank) { // Verifica se quem libera é quem ocupa
-                    strcpy(texto[linha], msg_edicao.conteudo); // Atualiza o texto
-                    linha_em_uso[linha] = 0; // Libera a linha
+                if (linha_em_uso[linha] == cliente_rank) {
+                    strcpy(texto[linha], msg_edicao.conteudo);
+                    linha_em_uso[linha] = 0;
                     snprintf(log_buffer, LOG_BUFFER_SIZE, "Linha %d atualizada por P%d: \"%s\"", linha, cliente_rank, msg_edicao.conteudo);
                     log_evento("Servidor", rank, log_buffer);
 
-                    // --- Comunicação coletiva/em grupo no padrão MPI ---
-                    // Notificar todos os clientes sobre a atualização
-                    MPI_Bcast(&msg_edicao, sizeof(MensagemEdicao), MPI_BYTE, 0, MPI_COMM_WORLD);
+                    MensagemEdicao atualizacao_para_bcast = msg_edicao; // Copia para broadcast
+                    MPI_Bcast(&atualizacao_para_bcast, sizeof(MensagemEdicao), MPI_BYTE, 0, MPI_COMM_WORLD);
                     snprintf(log_buffer, LOG_BUFFER_SIZE, "Broadcast de atualização da linha %d para todos os clientes.", linha);
                     log_evento("Servidor", rank, log_buffer);
                 } else {
@@ -152,25 +131,33 @@ void servidor_loop(int rank, int size) {
                 }
             } else if (status.MPI_TAG == TAG_MSG_PRIVADA_SEND) {
                 MPI_Recv(&msg_priv, sizeof(MensagemPrivada), MPI_BYTE, status.MPI_SOURCE, TAG_MSG_PRIVADA_SEND, MPI_COMM_WORLD, &status);
-                snprintf(log_buffer, LOG_BUFFER_SIZE, "Mensagem privada de P%d: \"%s\" (destinada ao servidor)", msg_priv.remetente_rank, msg_priv.mensagem);
+                
+                snprintf(log_buffer, LOG_BUFFER_SIZE, "Mensagem privada de P%d para P%d: \"%s\"", msg_priv.remetente_rank, msg_priv.destino_rank, msg_priv.mensagem);
                 log_evento("Servidor", rank, log_buffer);
-                // Se o servidor deveria encaminhar a mensagem para outro cliente,
-                // a lógica de MPI_Send para o destino real seria implementada aqui.
+
+                if (msg_priv.destino_rank != rank) {
+                    if (msg_priv.destino_rank > 0 && msg_priv.destino_rank < size) {
+                        MPI_Send(&msg_priv, sizeof(MensagemPrivada), MPI_BYTE, msg_priv.destino_rank, TAG_MSG_PRIVADA_SEND, MPI_COMM_WORLD);
+                        snprintf(log_buffer, LOG_BUFFER_SIZE, "Encaminhou mensagem de P%d para P%d.", msg_priv.remetente_rank, msg_priv.destino_rank);
+                        log_evento("Servidor", rank, log_buffer);
+                    } else {
+                        snprintf(log_buffer, LOG_BUFFER_SIZE, "Tentativa de enviar mensagem privada de P%d para rank inválido P%d.", msg_priv.remetente_rank, msg_priv.destino_rank);
+                        log_evento("Servidor", rank, log_buffer);
+                    }
+                }
             } else if (status.MPI_TAG == TAG_SAIR) {
                 MPI_Recv(&msg_edicao, sizeof(MensagemEdicao), MPI_BYTE, status.MPI_SOURCE, TAG_SAIR, MPI_COMM_WORLD, &status);
                 snprintf(log_buffer, LOG_BUFFER_SIZE, "P%d solicitou sair.", status.MPI_SOURCE);
                 log_evento("Servidor", rank, log_buffer);
             }
         }
-        usleep(1000); // Pequena pausa para evitar spin-lock excessivo na CPU
+        usleep(1000);
     }
 }
 
-// --- Funções do Cliente ---
 void cliente_loop(int rank, int size) {
-    char log_buffer[LOG_BUFFER_SIZE]; // Buffer para construir mensagens de log
+    char log_buffer[LOG_BUFFER_SIZE];
 
-    // Recebe o texto inicial do servidor (Broadcast)
     MPI_Bcast(texto, MAX_LINHAS * MAX_TAM_LINHA, MPI_CHAR, 0, MPI_COMM_WORLD);
     log_evento("Cliente", rank, "Texto inicial recebido do servidor.");
 
@@ -180,14 +167,14 @@ void cliente_loop(int rank, int size) {
         printf("1. Editar linha\n2. Mandar msg privada\n3. Ver texto\n4. Sair\n> ");
 
         int opcao;
-        if (scanf("%d", &opcao) != 1) { // Verifica se a leitura foi bem sucedida
+        if (scanf("%d", &opcao) != 1) {
             printf("[P%d] Entrada inválida. Digite um número.\n", rank);
-            while (getchar() != '\n'); // Limpa o buffer de entrada
+            while (getchar() != '\n');
             continue;
         }
-        getchar(); // Limpa o caractere de nova linha (\n) do buffer após scanf
+        getchar();
 
-        if (opcao == 1) { // Editar linha
+        if (opcao == 1) {
             int linha;
             printf("[P%d] Digite o número da linha para editar (0 a %d): ", rank, MAX_LINHAS - 1);
             if (scanf("%d", &linha) != 1) {
@@ -195,7 +182,7 @@ void cliente_loop(int rank, int size) {
                 while (getchar() != '\n');
                 continue;
             }
-            getchar(); // Limpa o \n
+            getchar();
 
             if (linha < 0 || linha >= MAX_LINHAS) {
                 printf("[P%d] Linha inválida. Digite um número entre 0 e %d.\n", rank, MAX_LINHAS - 1);
@@ -217,19 +204,19 @@ void cliente_loop(int rank, int size) {
                 printf("[P%d] Digite o novo conteúdo: ", rank);
                 char nova_linha[MAX_TAM_LINHA];
                 fgets(nova_linha, MAX_TAM_LINHA, stdin);
-                nova_linha[strcspn(nova_linha, "\n")] = 0; // Remove o \n
+                nova_linha[strcspn(nova_linha, "\n")] = 0;
 
                 strcpy(solicitacao.conteudo, nova_linha);
-                solicitacao.linha = linha; // Garante que a linha está correta na mensagem de volta
+                solicitacao.linha = linha;
 
                 MPI_Send(&solicitacao, sizeof(MensagemEdicao), MPI_BYTE, 0, TAG_LIBERAR_LINHA, MPI_COMM_WORLD);
                 snprintf(log_buffer, LOG_BUFFER_SIZE, "Enviou linha %d atualizada para o servidor.", linha);
                 log_evento("Cliente", rank, log_buffer);
-                strcpy(texto[linha], nova_linha); // Atualiza sua cópia local imediatamente
+                strcpy(texto[linha], nova_linha);
             } else {
                 printf("[P%d] Não foi possível editar a linha %d. Ela está ocupada.\n", rank, linha);
             }
-        } else if (opcao == 2) { // Mandar msg privada
+        } else if (opcao == 2) {
             int destino;
             printf("[P%d] Digite o rank do destinatário (0 a %d, exceto %d): ", rank, size - 1, rank);
             if (scanf("%d", &destino) != 1 || destino < 0 || destino >= size || destino == rank) {
@@ -237,26 +224,27 @@ void cliente_loop(int rank, int size) {
                 while (getchar() != '\n');
                 continue;
             }
-            getchar(); // Limpa o \n
+            getchar();
 
             MensagemPrivada msg_para_enviar;
             msg_para_enviar.remetente_rank = rank;
+            msg_para_enviar.destino_rank = destino;
             printf("[P%d] Digite a mensagem: ", rank);
             fgets(msg_para_enviar.mensagem, MAX_MSG_PRIVADA, stdin);
-            msg_para_enviar.mensagem[strcspn(msg_para_enviar.mensagem, "\n")] = 0; // Remove o \n
+            msg_para_enviar.mensagem[strcspn(msg_para_enviar.mensagem, "\n")] = 0;
 
-            MPI_Send(&msg_para_enviar, sizeof(MensagemPrivada), MPI_BYTE, destino, TAG_MSG_PRIVADA_SEND, MPI_COMM_WORLD);
-            snprintf(log_buffer, LOG_BUFFER_SIZE, "Mensagem enviada para P%d.", destino);
+            MPI_Send(&msg_para_enviar, sizeof(MensagemPrivada), MPI_BYTE, 0, TAG_MSG_PRIVADA_SEND, MPI_COMM_WORLD);
+            snprintf(log_buffer, LOG_BUFFER_SIZE, "Mensagem enviada para P%d (via servidor).", destino);
             log_evento("Cliente", rank, log_buffer);
-        } else if (opcao == 3) { 
+        } else if (opcao == 3) {
             imprimir_texto(rank);
-        } else if (opcao == 4) { 
+        } else if (opcao == 4) {
             snprintf(log_buffer, LOG_BUFFER_SIZE, "Encerrando...");
             log_evento("Cliente", rank, log_buffer);
-            MensagemEdicao sair_msg; 
+            MensagemEdicao sair_msg;
             sair_msg.rank_solicitante = rank;
             MPI_Send(&sair_msg, sizeof(MensagemEdicao), MPI_BYTE, 0, TAG_SAIR, MPI_COMM_WORLD);
-            running = 0; 
+            running = 0;
         } else {
             printf("[P%d] Opção inválida. Tente novamente.\n", rank);
         }
@@ -265,7 +253,7 @@ void cliente_loop(int rank, int size) {
         int flag;
         while (1) {
             MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
-            if (!flag) break; 
+            if (!flag) break;
 
             if (status.MPI_TAG == TAG_ATUALIZACAO_TEXTO) {
                 MensagemEdicao atualizacao_recebida;
@@ -281,12 +269,10 @@ void cliente_loop(int rank, int size) {
                 snprintf(log_buffer, LOG_BUFFER_SIZE, "Mensagem privada recebida de P%d.", msg_recebida.remetente_rank);
                 log_evento("Cliente", rank, log_buffer);
             }
-            
         }
-        usleep(1000); 
+        usleep(1000);
     }
 }
-
 
 int main(int argc, char** argv) {
     int rank, size;
