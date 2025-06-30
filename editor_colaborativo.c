@@ -333,5 +333,3 @@ int main(int argc, char** argv) {
     MPI_Finalize();
     return 0;
 }
-editor_colaborativo.c
-15 KB
