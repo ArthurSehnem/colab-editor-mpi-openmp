@@ -24,14 +24,19 @@ Este projeto implementa um editor de texto colaborativo que permite a edição s
 - Ambiente com **MPI** instalado (ex: MPICH ou OpenMPI)
 - Terminal Linux ou WSL (para Windows)
 
-Para rodar e necessario o xterm:
+## Para rodar e necessario o xterm:
 
+```
 sudo apt install xterm
+````
 
-compilar o codigo com:
+### compilar o codigo com:
 
+```
 mpicc -fopenmp -o editor_colaborativo editor_colaborativo.c
+```
 
-Para rodar basta executar:
-
+### Para rodar basta executar:
+```
 ./run_multi_xterm.sh
+```
